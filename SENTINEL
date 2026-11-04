@@ -1,0 +1,192 @@
+
+/************************************************************
+ SENTINEL-2 MULTITEMPORAL
+ NAMIREZ BAJO - ECUADOR
+ PERIODO: 2015 - 2026
+ RESOLUCION: 10 METROS PARA RGB Y NIR
+************************************************************/
+
+// 1. AREA DE ESTUDIO
+
+var punto = ee.Geometry.Point([-78.8493, -3.95917]);
+var area = punto.buffer(2000);
+
+Map.centerObject(area, 14);
+Map.addLayer(area, {color: 'red'}, 'Area de estudio');
+
+
+// 2. COLECCIONES
+
+var s2L1C = ee.ImageCollection('COPERNICUS/S2_HARMONIZED')
+  .filterBounds(area)
+  .filterDate('2015-06-27', '2017-03-28')
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 90));
+
+var s2L2A = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+  .filterBounds(area)
+  .filterDate('2017-03-28', '2026-11-02')
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 90));
+
+print('Escenas L1C 2015-2017:', s2L1C.size());
+print('Escenas L2A 2017-2026:', s2L2A.size());
+
+
+// 3. PREPROCESAMIENTO L1C
+// QA60 permite enmascarar nubes y cirros.
+// No es una mascara perfecta, especialmente en fechas antiguas.
+
+function prepararL1C(img) {
+  var qa = img.select('QA60');
+
+  var nube = 1 << 10;
+  var cirro = 1 << 11;
+
+  var mascara = qa.bitwiseAnd(nube).eq(0)
+    .and(qa.bitwiseAnd(cirro).eq(0));
+
+  return img.updateMask(mascara)
+    .select(['B2', 'B3', 'B4', 'B8'])
+    .multiply(0.0001)
+    .copyProperties(img, ['system:time_start']);
+}
+
+
+// 4. PREPROCESAMIENTO L2A
+// SCL elimina sombras, nubes y pixeles no validos.
+
+function prepararL2A(img) {
+  var scl = img.select('SCL');
+
+  var mascara = scl.neq(0)
+    .and(scl.neq(1))
+    .and(scl.neq(3))
+    .and(scl.neq(8))
+    .and(scl.neq(9))
+    .and(scl.neq(10))
+    .and(scl.neq(11));
+
+  return img.updateMask(mascara)
+    .select(['B2', 'B3', 'B4', 'B8'])
+    .multiply(0.0001)
+    .copyProperties(img, ['system:time_start']);
+}
+
+var l1c = s2L1C.map(prepararL1C);
+var l2a = s2L2A.map(prepararL2A);
+
+
+// 5. VISUALIZACIONES
+
+var rgb = {
+  bands: ['B4', 'B3', 'B2'],
+  min: 0.02,
+  max: 0.30,
+  gamma: 1.2
+};
+
+var falsoColor = {
+  bands: ['B8', 'B4', 'B3'],
+  min: 0.02,
+  max: 0.40,
+  gamma: 1.2
+};
+
+var ndviVis = {
+  min: -0.2,
+  max: 0.8,
+  palette: ['brown', 'yellow', 'lightgreen', 'green', 'darkgreen']
+};
+
+
+// 6. FUNCION DE PROCESAMIENTO ANUAL
+
+function procesar(anio, coleccion) {
+
+  var inicio = ee.Date.fromYMD(anio, 1, 1);
+  var fin = ee.Date.fromYMD(anio + 1, 1, 1);
+
+  if (anio === 2015) {
+    inicio = ee.Date('2015-06-27');
+  }
+
+  if (anio === 2026) {
+    fin = ee.Date('2026-11-02');
+  }
+
+  var anual = coleccion.filterDate(inicio, fin);
+
+  print('Escenas del año ' + anio, anual.size());
+
+  anual.size().evaluate(function(n) {
+
+    if (n === 0) {
+      print('Sin escenas disponibles para ' + anio);
+      return;
+    }
+
+    var imagen = anual.median().clip(area);
+
+    var ndvi = imagen.normalizedDifference(['B8', 'B4'])
+      .rename('NDVI');
+
+    Map.addLayer(imagen, rgb, 'RGB ' + anio, false);
+    Map.addLayer(imagen, falsoColor, 'Falso color ' + anio, false);
+    Map.addLayer(ndvi, ndviVis, 'NDVI ' + anio, false);
+
+    Export.image.toDrive({
+      image: imagen.select(['B4', 'B3', 'B2']),
+      description: 'SENTINEL_RGB_' + anio,
+      folder: 'SENTINEL_NAMIREZ_2015_2026',
+      fileNamePrefix: 'RGB_' + anio,
+      region: area,
+      scale: 10,
+      maxPixels: 1e13,
+      fileFormat: 'GeoTIFF'
+    });
+
+    Export.image.toDrive({
+      image: imagen.select(['B8', 'B4', 'B3']),
+      description: 'SENTINEL_FALSO_COLOR_' + anio,
+      folder: 'SENTINEL_NAMIREZ_2015_2026',
+      fileNamePrefix: 'FALSO_COLOR_' + anio,
+      region: area,
+      scale: 10,
+      maxPixels: 1e13,
+      fileFormat: 'GeoTIFF'
+    });
+
+    Export.image.toDrive({
+      image: ndvi,
+      description: 'SENTINEL_NDVI_' + anio,
+      folder: 'SENTINEL_NAMIREZ_2015_2026',
+      fileNamePrefix: 'NDVI_' + anio,
+      region: area,
+      scale: 10,
+      maxPixels: 1e13,
+      fileFormat: 'GeoTIFF'
+    });
+
+  });
+}
+
+
+// 7. PROCESAR 2015 Y 2016 CON L1C
+
+procesar(2015, l1c);
+procesar(2016, l1c);
+
+
+// 8. PROCESAR 2017 A 2026 CON L2A
+
+for (var anio = 2017; anio <= 2026; anio++) {
+  procesar(anio, l2a);
+}
+
+
+// 9. INFORMACION FINAL
+
+print('ESTUDIO SENTINEL-2: 2015-2026');
+print('2015-2016: L1C, reflectancia TOA');
+print('2017-2026: L2A, reflectancia de superficie');
+print('RGB y falso color: 10 metros');
+print('NDVI: 10 metros');
