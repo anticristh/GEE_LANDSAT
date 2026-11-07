@@ -1,0 +1,250 @@
+
+(async function exportarImagenesPDF() {
+    "use strict";
+
+    const CONFIG = {
+        libraryURL:
+            "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js",
+        fileName: "documento_original.pdf",
+        imageQuality: 1.0,
+        imageType: "JPEG",
+        maxPixels: 40000000
+    };
+
+    console.log("Iniciando exportación...");
+
+    // 1. Comprobar si jsPDF ya está disponible
+    function obtenerJsPDF() {
+        return window.jspdf?.jsPDF || null;
+    }
+
+    // 2. Cargar jsPDF si no está disponible
+    function cargarJsPDF() {
+        return new Promise((resolve, reject) => {
+            const existente = obtenerJsPDF();
+
+            if (existente) {
+                resolve(existente);
+                return;
+            }
+
+            const script = document.createElement("script");
+
+            try {
+                const url = new URL(CONFIG.libraryURL);
+
+                if (url.origin !==
+                    "https://cdnjs.cloudflare.com") {
+                    throw new Error("Origen de biblioteca no permitido");
+                }
+
+                if (window.trustedTypes) {
+                    let policy;
+
+                    try {
+                        policy = trustedTypes.createPolicy(
+                            "myPolicy",
+                            {
+                                createScriptURL(input) {
+                                    const parsed = new URL(input);
+
+                                    if (
+                                        parsed.origin !==
+                                        "https://cdnjs.cloudflare.com"
+                                    ) {
+                                        throw new TypeError(
+                                            "URL no autorizada"
+                                        );
+                                    }
+
+                                    return input;
+                                }
+                            }
+                        );
+                    } catch (error) {
+                        reject(new Error(
+                            "La CSP no permite crear esta política Trusted Types. " +
+                            error.message
+                        ));
+                        return;
+                    }
+
+                    script.src = policy.createScriptURL(url.href);
+                } else {
+                    script.src = url.href;
+                }
+
+                script.onload = () => {
+                    const jsPDF = obtenerJsPDF();
+
+                    if (!jsPDF) {
+                        reject(new Error(
+                            "La biblioteca se cargó, pero jsPDF no está disponible."
+                        ));
+                        return;
+                    }
+
+                    resolve(jsPDF);
+                };
+
+                script.onerror = () => {
+                    reject(new Error(
+                        "No se pudo cargar jsPDF. Comprueba CSP y conexión."
+                    ));
+                };
+
+                document.head.appendChild(script);
+
+            } catch (error) {
+                reject(error);
+            }
+        });
+    }
+
+    // 3. Esperar a que una imagen esté disponible
+    async function esperarImagen(img) {
+        if (!img.complete) {
+            await new Promise(resolve => {
+                img.addEventListener("load", resolve, {
+                    once: true
+                });
+
+                img.addEventListener("error", resolve, {
+                    once: true
+                });
+            });
+        }
+
+        if (!img.naturalWidth || !img.naturalHeight) {
+            throw new Error("Imagen sin dimensiones válidas");
+        }
+    }
+
+    // 4. Convertir imagen a JPEG
+    function convertirImagen(img) {
+        const width = img.naturalWidth;
+        const height = img.naturalHeight;
+
+        if (width * height > CONFIG.maxPixels) {
+            throw new Error("Imagen demasiado grande para procesar");
+        }
+
+        const canvas = document.createElement("canvas");
+
+        canvas.width = width;
+        canvas.height = height;
+
+        const ctx = canvas.getContext("2d");
+
+        if (!ctx) {
+            throw new Error("No se pudo crear Canvas");
+        }
+
+        ctx.drawImage(img, 0, 0, width, height);
+
+        const data = canvas.toDataURL(
+            "image/jpeg",
+            CONFIG.imageQuality
+        );
+
+        return {
+            data,
+            width,
+            height
+        };
+    }
+
+    // 5. Proceso principal
+    try {
+        const jsPDF = await cargarJsPDF();
+
+        const imagenes = Array.from(document.images).filter(
+            img => img.currentSrc.startsWith("blob:") ||
+                   img.src.startsWith("blob:")
+        );
+
+        if (imagenes.length === 0) {
+            console.warn("No se encontraron imágenes blob:.");
+            return;
+        }
+
+        console.log("Imágenes encontradas:", imagenes.length);
+
+        let pdf = null;
+        let procesadas = 0;
+        let errores = 0;
+
+        for (let i = 0; i < imagenes.length; i++) {
+            const img = imagenes[i];
+
+            try {
+                await esperarImagen(img);
+
+                const imagen = convertirImagen(img);
+
+                const orientation =
+                    imagen.width > imagen.height
+                        ? "landscape"
+                        : "portrait";
+
+                if (!pdf) {
+                    pdf = new jsPDF({
+                        orientation,
+                        unit: "px",
+                        format: [
+                            imagen.width,
+                            imagen.height
+                        ],
+                        hotfixes: ["px_scaling"],
+                        compress: true
+                    });
+                } else {
+                    pdf.addPage(
+                        [imagen.width, imagen.height],
+                        orientation
+                    );
+                }
+
+                pdf.addImage(
+                    imagen.data,
+                    CONFIG.imageType,
+                    0,
+                    0,
+                    imagen.width,
+                    imagen.height,
+                    undefined,
+                    "FAST"
+                );
+
+                procesadas++;
+
+                console.log(
+                    `Imagen ${i + 1}/${imagenes.length}: OK`
+                );
+
+            } catch (error) {
+                errores++;
+
+                console.error(
+                    `Error en imagen ${i + 1}:`,
+                    error.message
+                );
+            }
+        }
+
+        // 6. Guardar documento
+        if (pdf && procesadas > 0) {
+            pdf.save(CONFIG.fileName);
+
+            console.log("Exportación terminada.");
+            console.log("Imágenes procesadas:", procesadas);
+            console.log("Errores:", errores);
+        } else {
+            console.warn("No se pudo generar el PDF.");
+        }
+
+    } catch (error) {
+        console.error("ERROR GENERAL:", error);
+    }
+
+})();
