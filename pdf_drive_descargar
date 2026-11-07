@@ -1,250 +1,267 @@
+// Entendido. El problema es que el código anterior solamente procesa las imágenes que están cargadas en el DOM en ese momento. 
+// Si la página tiene 382 páginas (1/382) y carga el contenido conforme avanzas, el script no encontrará las 382 imágenes.
+// Hay que incorporar un sistema de detección de páginas, desplazamiento progresivo y recopilación de imágenes antes de generar el PDF.
+// Te dejo una versión mejorada que intenta recorrer el contenido cargado progresivamente, sin saltarse imágenes que todavía no estén disponibles.
+// Código completo para Firefox
 
-(async function exportarImagenesPDF() {
+(async function exportarTodasLasPaginas() {
     "use strict";
 
     const CONFIG = {
-        libraryURL:
-            "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js",
-        fileName: "documento_original.pdf",
-        imageQuality: 1.0,
-        imageType: "JPEG",
+        totalPaginas: 382,
+        nombrePDF: "documento_completo.pdf",
+        calidad: 1.0,
+        intervaloCarga: 250,
+        intentosCarga: 12,
         maxPixels: 40000000
     };
 
-    console.log("Iniciando exportación...");
+    console.log("Iniciando recopilación de páginas...");
 
-    // 1. Comprobar si jsPDF ya está disponible
-    function obtenerJsPDF() {
-        return window.jspdf?.jsPDF || null;
+    // Evitar ejecuciones simultáneas
+    if (window.__exportandoPDF) {
+        console.warn("Ya existe una exportación en curso.");
+        return;
     }
 
-    // 2. Cargar jsPDF si no está disponible
-    function cargarJsPDF() {
-        return new Promise((resolve, reject) => {
-            const existente = obtenerJsPDF();
+    window.__exportandoPDF = true;
 
-            if (existente) {
-                resolve(existente);
-                return;
-            }
+    try {
+        // Comprobar jsPDF
+        if (!window.jspdf?.jsPDF) {
+            throw new Error(
+                "jsPDF no está cargado. Cárgalo mediante un método autorizado por la CSP."
+            );
+        }
 
-            const script = document.createElement("script");
+        const { jsPDF } = window.jspdf;
 
-            try {
-                const url = new URL(CONFIG.libraryURL);
+        // Recopilar imágenes sin duplicarlas
+        const recopiladas = new Map();
 
-                if (url.origin !==
-                    "https://cdnjs.cloudflare.com") {
-                    throw new Error("Origen de biblioteca no permitido");
+        function obtenerImagenes() {
+            document.querySelectorAll("img").forEach(img => {
+                const src = img.currentSrc || img.src;
+
+                if (!src || !src.startsWith("blob:")) return;
+
+                if (!recopiladas.has(src)) {
+                    recopiladas.set(src, img);
                 }
-
-                if (window.trustedTypes) {
-                    let policy;
-
-                    try {
-                        policy = trustedTypes.createPolicy(
-                            "myPolicy",
-                            {
-                                createScriptURL(input) {
-                                    const parsed = new URL(input);
-
-                                    if (
-                                        parsed.origin !==
-                                        "https://cdnjs.cloudflare.com"
-                                    ) {
-                                        throw new TypeError(
-                                            "URL no autorizada"
-                                        );
-                                    }
-
-                                    return input;
-                                }
-                            }
-                        );
-                    } catch (error) {
-                        reject(new Error(
-                            "La CSP no permite crear esta política Trusted Types. " +
-                            error.message
-                        ));
-                        return;
-                    }
-
-                    script.src = policy.createScriptURL(url.href);
-                } else {
-                    script.src = url.href;
-                }
-
-                script.onload = () => {
-                    const jsPDF = obtenerJsPDF();
-
-                    if (!jsPDF) {
-                        reject(new Error(
-                            "La biblioteca se cargó, pero jsPDF no está disponible."
-                        ));
-                        return;
-                    }
-
-                    resolve(jsPDF);
-                };
-
-                script.onerror = () => {
-                    reject(new Error(
-                        "No se pudo cargar jsPDF. Comprueba CSP y conexión."
-                    ));
-                };
-
-                document.head.appendChild(script);
-
-            } catch (error) {
-                reject(error);
-            }
-        });
-    }
-
-    // 3. Esperar a que una imagen esté disponible
-    async function esperarImagen(img) {
-        if (!img.complete) {
-            await new Promise(resolve => {
-                img.addEventListener("load", resolve, {
-                    once: true
-                });
-
-                img.addEventListener("error", resolve, {
-                    once: true
-                });
             });
         }
 
-        if (!img.naturalWidth || !img.naturalHeight) {
-            throw new Error("Imagen sin dimensiones válidas");
-        }
-    }
+        // Buscar indicador de página actual
+        function leerPaginaActual() {
+            const texto = document.body.innerText;
 
-    // 4. Convertir imagen a JPEG
-    function convertirImagen(img) {
-        const width = img.naturalWidth;
-        const height = img.naturalHeight;
+            const coincidencia = texto.match(
+                /(\d{1,3})\s*\/\s*382/
+            );
 
-        if (width * height > CONFIG.maxPixels) {
-            throw new Error("Imagen demasiado grande para procesar");
-        }
-
-        const canvas = document.createElement("canvas");
-
-        canvas.width = width;
-        canvas.height = height;
-
-        const ctx = canvas.getContext("2d");
-
-        if (!ctx) {
-            throw new Error("No se pudo crear Canvas");
+            return coincidencia
+                ? Number(coincidencia[1])
+                : null;
         }
 
-        ctx.drawImage(img, 0, 0, width, height);
+        // Desplazamiento progresivo para activar carga diferida
+        async function recorrerDocumento() {
+            const alturaOriginal = window.scrollY;
 
-        const data = canvas.toDataURL(
-            "image/jpeg",
-            CONFIG.imageQuality
-        );
+            const alturaTotal = Math.max(
+                document.documentElement.scrollHeight,
+                document.body.scrollHeight
+            );
 
-        return {
-            data,
-            width,
-            height
-        };
-    }
+            const pasos = Math.max(
+                CONFIG.totalPaginas,
+                Math.ceil(alturaTotal / window.innerHeight)
+            );
 
-    // 5. Proceso principal
-    try {
-        const jsPDF = await cargarJsPDF();
+            for (let i = 0; i <= pasos; i++) {
+                const posicion =
+                    (alturaTotal * i) / pasos;
 
-        const imagenes = Array.from(document.images).filter(
-            img => img.currentSrc.startsWith("blob:") ||
-                   img.src.startsWith("blob:")
-        );
+                window.scrollTo(0, posicion);
 
-        if (imagenes.length === 0) {
-            console.warn("No se encontraron imágenes blob:.");
-            return;
-        }
-
-        console.log("Imágenes encontradas:", imagenes.length);
-
-        let pdf = null;
-        let procesadas = 0;
-        let errores = 0;
-
-        for (let i = 0; i < imagenes.length; i++) {
-            const img = imagenes[i];
-
-            try {
-                await esperarImagen(img);
-
-                const imagen = convertirImagen(img);
-
-                const orientation =
-                    imagen.width > imagen.height
-                        ? "landscape"
-                        : "portrait";
-
-                if (!pdf) {
-                    pdf = new jsPDF({
-                        orientation,
-                        unit: "px",
-                        format: [
-                            imagen.width,
-                            imagen.height
-                        ],
-                        hotfixes: ["px_scaling"],
-                        compress: true
-                    });
-                } else {
-                    pdf.addPage(
-                        [imagen.width, imagen.height],
-                        orientation
-                    );
-                }
-
-                pdf.addImage(
-                    imagen.data,
-                    CONFIG.imageType,
-                    0,
-                    0,
-                    imagen.width,
-                    imagen.height,
-                    undefined,
-                    "FAST"
+                await new Promise(resolve =>
+                    setTimeout(resolve, CONFIG.intervaloCarga)
                 );
 
-                procesadas++;
+                obtenerImagenes();
 
                 console.log(
-                    `Imagen ${i + 1}/${imagenes.length}: OK`
+                    "Recorrido:",
+                    i + 1,
+                    "/",
+                    pasos,
+                    "| Imágenes:",
+                    recopiladas.size,
+                    "| Página:",
+                    leerPaginaActual()
+                );
+            }
+
+            // Restaurar posición
+            window.scrollTo(0, alturaOriginal);
+        }
+
+        // 1. Recopilar imágenes actuales
+        obtenerImagenes();
+
+        // 2. Recorrer el documento para activar carga diferida
+        await recorrerDocumento();
+
+        // 3. Segunda recopilación
+        obtenerImagenes();
+
+        console.log(
+            "Total de imágenes recopiladas:",
+            recopiladas.size
+        );
+
+        if (recopiladas.size === 0) {
+            throw new Error("No se encontraron imágenes Blob.");
+        }
+
+        // 4. Convertir las imágenes en datos independientes
+        const imagenesPDF = [];
+
+        let indice = 0;
+
+        for (const [src, img] of recopiladas) {
+            indice++;
+
+            try {
+                let imagen = img;
+
+                // Si la imagen original fue reemplazada,
+                // intentar recuperar el recurso Blob.
+                if (!img.complete || !img.naturalWidth) {
+                    await new Promise(resolve => {
+                        let terminado = false;
+
+                        const finalizar = () => {
+                            if (terminado) return;
+                            terminado = true;
+                            resolve();
+                        };
+
+                        img.addEventListener("load", finalizar, {
+                            once: true
+                        });
+
+                        img.addEventListener("error", finalizar, {
+                            once: true
+                        });
+
+                        setTimeout(finalizar, 5000);
+                    });
+                }
+
+                if (!imagen.naturalWidth) {
+                    console.warn("Imagen no disponible:", indice);
+                    continue;
+                }
+
+                const width = imagen.naturalWidth;
+                const height = imagen.naturalHeight;
+
+                if (width * height > CONFIG.maxPixels) {
+                    console.warn("Imagen demasiado grande:", indice);
+                    continue;
+                }
+
+                const canvas = document.createElement("canvas");
+
+                canvas.width = width;
+                canvas.height = height;
+
+                const ctx = canvas.getContext("2d");
+
+                ctx.drawImage(imagen, 0, 0);
+
+                const data = canvas.toDataURL(
+                    "image/jpeg",
+                    CONFIG.calidad
+                );
+
+                imagenesPDF.push({
+                    data,
+                    width,
+                    height
+                });
+
+                console.log(
+                    `Imagen preparada: ${indice}/${recopiladas.size}`
                 );
 
             } catch (error) {
-                errores++;
-
                 console.error(
-                    `Error en imagen ${i + 1}:`,
-                    error.message
+                    `Error en imagen ${indice}:`,
+                    error
                 );
             }
         }
 
-        // 6. Guardar documento
-        if (pdf && procesadas > 0) {
-            pdf.save(CONFIG.fileName);
-
-            console.log("Exportación terminada.");
-            console.log("Imágenes procesadas:", procesadas);
-            console.log("Errores:", errores);
-        } else {
-            console.warn("No se pudo generar el PDF.");
+        // 5. Generar PDF
+        if (!imagenesPDF.length) {
+            throw new Error("No hay imágenes válidas para el PDF.");
         }
 
+        let pdf = null;
+
+        imagenesPDF.forEach((imagen, index) => {
+            const orientacion =
+                imagen.width > imagen.height
+                    ? "landscape"
+                    : "portrait";
+
+            if (index === 0) {
+                pdf = new jsPDF({
+                    orientation: orientacion,
+                    unit: "px",
+                    format: [
+                        imagen.width,
+                        imagen.height
+                    ],
+                    hotfixes: ["px_scaling"],
+                    compress: true
+                });
+            } else {
+                pdf.addPage(
+                    [imagen.width, imagen.height],
+                    orientacion
+                );
+            }
+
+            pdf.addImage(
+                imagen.data,
+                "JPEG",
+                0,
+                0,
+                imagen.width,
+                imagen.height,
+                undefined,
+                "FAST"
+            );
+        });
+
+        // 6. Descargar
+        pdf.save(CONFIG.nombrePDF);
+
+        console.log("--------------------------------");
+        console.log("EXPORTACIÓN FINALIZADA");
+        console.log("Páginas encontradas:", recopiladas.size);
+        console.log("Páginas incorporadas:", imagenesPDF.length);
+        console.log("Páginas solicitadas:", CONFIG.totalPaginas);
+        console.log("--------------------------------");
+
     } catch (error) {
-        console.error("ERROR GENERAL:", error);
+        console.error("ERROR:", error);
+
+    } finally {
+        window.__exportandoPDF = false;
     }
 
 })();
